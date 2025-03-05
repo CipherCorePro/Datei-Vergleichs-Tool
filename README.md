@@ -4,7 +4,9 @@
 
 # CipherCore Datei Vergleichs-Tool - Professionelle README
 
-![CipherCore Logo](assets/ciphercore_logo_standard.png)
+ ![logo](https://github.com/user-attachments/assets/2feeb445-0df5-4aef-927b-550a4f1932f6)
+
+
 
 ## Übersicht
 
