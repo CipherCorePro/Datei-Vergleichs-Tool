@@ -1,10 +1,14 @@
+# CipherCore
+
+
+
 # CipherCore Datei Vergleichs-Tool - Professionelle README
 
 ![CipherCore Logo](assets/ciphercore_logo_standard.png)
 
 ## Übersicht
 
-Das CipherCore Datei Vergleichs-Tool ist eine hochentwickelte Anwendung zum detaillierten Vergleich von zwei Dateien unterschiedlicher Formate (.csv, .txt, .xls, .xlsx). Es generiert umfassende Vergleichsberichte im PDF-Format, inklusive statistischer Auswertungen und grafischer Diagramme. Entwickelt von CipherCore GmbH, bietet dieses Tool eine benutzerfreundliche Oberfläche (GUI) sowie einen Kommandozeilenmodus (CLI) für maximale Flexibilität.
+Das CipherCore Datei Vergleichs-Tool ist eine hochentwickelte Anwendung zum detaillierten Vergleich von zwei Dateien unterschiedlicher Formate (.csv, .txt, .xls, .xlsx). Es generiert umfassende Vergleichsberichte im PDF-Format, inklusive statistischer Auswertungen und grafischer Diagramme. Entwickelt von CipherCore, bietet dieses Tool eine benutzerfreundliche Oberfläche (GUI) sowie einen Kommandozeilenmodus (CLI) für maximale Flexibilität.
 
 **Wichtige Merkmale:**
 
@@ -314,15 +318,15 @@ Es wird empfohlen, bei Problemen zuerst die Log-Datei zu konsultieren, bevor Sup
 
 ## 6. Lizenzbedingungen und Urheberrecht
 
-**Urheberrecht:** Copyright (c) 2024 CipherCore GmbH
+**Urheberrecht:** Copyright (c) 2024 CipherCore
 
 **Lizenz:** Proprietär - Alle Rechte vorbehalten
 
 Dieses CipherCore Datei Vergleichs-Tool ist urheberrechtlich geschützt und wird unter einer **proprietären Lizenz** vertrieben. **Alle Rechte sind vorbehalten.**
 
-*   Die Software darf **nicht** ohne ausdrückliche schriftliche Genehmigung der CipherCore GmbH kopiert, verändert, verbreitet, verkauft oder für kommerzielle Zwecke genutzt werden.
+*   Die Software darf **nicht** ohne ausdrückliche schriftliche Genehmigung der CipherCore kopiert, verändert, verbreitet, verkauft oder für kommerzielle Zwecke genutzt werden.
 *   Die Software wird als **Testversion** bereitgestellt und ist für **Evaluierungszwecke** gedacht.
-*   Die Nutzung der Software nach Ablauf der Testphase oder für kommerzielle Zwecke erfordert den Erwerb einer **Vollversion** oder einer entsprechenden **Lizenzvereinbarung** mit der CipherCore GmbH.
+*   Die Nutzung der Software nach Ablauf der Testphase oder für kommerzielle Zwecke erfordert den Erwerb einer **Vollversion** oder einer entsprechenden **Lizenzvereinbarung** mit CipherCore.
 
 **Bitte beachten Sie die vollständigen Lizenzbedingungen, die beim ersten Start der GUI im Lizenzdialog angezeigt werden.**
 
@@ -336,7 +340,7 @@ Das CipherCore Datei Vergleichs-Tool wurde mit Fokus auf Sicherheit entwickelt. 
 *   **Prepared Statements (SQLite):** Bei Verwendung des SQLite Datenmanagers werden Prepared Statements verwendet, um SQL-Injection-Angriffe zu verhindern.
 *   **Datenvalidierung:** Das Tool führt grundlegende Datenvalidierungen durch, um sicherzustellen, dass die geladenen Daten dem erwarteten Format entsprechen. Es wird jedoch empfohlen, die Eingabedateien vor der Verwendung des Tools sorgfältig zu prüfen und sicherzustellen, dass sie keine schädlichen Inhalte enthalten.
 *   **Logging:** Das Logging-System protokolliert sensible Informationen (wie Dateipfade) in der Log-Datei. Stellen Sie sicher, dass der Zugriff auf die Log-Dateien entsprechend geschützt ist, um unbefugten Zugriff auf diese Informationen zu verhindern.
-*   **Testversion "wie besehen":** Diese Software wird "wie besehen" und ohne jegliche Gewährleistung bereitgestellt. CipherCore GmbH übernimmt keine Haftung für Schäden, die durch die Nutzung dieser Software entstehen könnten, insbesondere Datenverlust oder Sicherheitsverletzungen. Die Nutzung erfolgt auf eigene Gefahr.
+*   **Testversion "wie besehen":** Diese Software wird "wie besehen" und ohne jegliche Gewährleistung bereitgestellt. CipherCore übernimmt keine Haftung für Schäden, die durch die Nutzung dieser Software entstehen könnten, insbesondere Datenverlust oder Sicherheitsverletzungen. Die Nutzung erfolgt auf eigene Gefahr.
 
 Es wird empfohlen, die Software in einer sicheren Umgebung zu betreiben und die Sicherheitshinweise sorgfältig zu beachten.
 
@@ -359,18 +363,20 @@ Zur Qualitätssicherung sind Unit Tests implementiert, die die Funktionalität d
 
 ## 9. Support und Kontakt
 
-Für Supportanfragen, Feedback oder den Erwerb einer Vollversion des CipherCore Datei Vergleichs-Tools kontaktieren Sie bitte das Vertriebsteam der CipherCore GmbH:
+Für Supportanfragen, Feedback oder den Erwerb einer Vollversion des CipherCore Datei Vergleichs-Tools kontaktieren Sie bitte das Vertriebsteam von CipherCore:
 
-**CipherCore GmbH**
+**CipherCore**
 
-[Ihre Adresse]
+Wintergartenstrasse 2
+04103 Leipzig
 
-[Ihre Website]
+# [https://ciphercore.de]
 
-[Ihre E-Mail-Adresse für Support/Vertrieb]
+
+# support@ciphercore.de
 
 Wir sind bestrebt, Ihnen eine hochwertige Software und einen exzellenten Kundenservice zu bieten.
 
 ---
 
-**Dokument erstellt von CipherCore GmbH.**
+**Dokument erstellt von CipherCore.**
