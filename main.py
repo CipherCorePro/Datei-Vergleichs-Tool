@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# CipherCore - Datei Vergleichs Tool - Pro Version
+
 import argparse
 import json
 import logging
@@ -7,7 +9,7 @@ import datetime
 import base64
 from io import BytesIO
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, Checkbutton, Button
+from tkinter import filedialog, messagebox, scrolledtext, Checkbutton, Button, Entry, Label
 import threading
 import sqlite3
 import pandas as pd
@@ -17,6 +19,12 @@ from abc import ABC, abstractmethod
 from typing import Dict, Tuple, List, Optional, Callable
 
 from PIL import Image  # Importiere PIL Image für die Bildverarbeitung
+import secrets # Importiere secrets für die Schlüsselerstellung
+from cryptography.hazmat.primitives import serialization # Importiere Kryptographie Bibliotheken
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.exceptions import InvalidSignature
+
 
 # --- CipherCore Urheberrechtsvermerk und Lizenz ---
 __copyright__ = "Copyright (c) 2024 CipherCore GmbH"
@@ -31,6 +39,8 @@ CONFIG_SCHLUESSEL_LIZENZ_AKZEPTIERT = "lizenz_akzeptiert"
 CONFIG_SCHLUESSEL_DATENBANK_PFAD = "datenbank_pfad"
 DATENBANK_DATEINAME_STANDARD = 'ciphercore_datei_vergleich.db' # Standard Datenbankname
 DATEN_VERZEICHNIS_STANDARD = 'ciphercore_vergleichsdaten' # Standard Datenverzeichnis
+CONFIG_SCHLUESSEL_LIZENZSCHLUESSEL = "lizenzschluessel" # Schlüssel für den Lizenzschlüssel in der Konfiguration
+OEFFENTLICHER_SCHLUESSEL_PFAD = "public_key.pem" # Pfad zum öffentlichen Schlüssel für Lizenzvalidierung
 
 DATEIFORMAT_CSV = '.csv'
 DATEIFORMAT_TEXT = '.txt'
@@ -69,7 +79,8 @@ STANDARD_KONFIGURATION = {
     CONFIG_SCHLUESSEL_ERSTES_STARTDATUM: None, # Erstes Startdatum für Testphase
     CONFIG_SCHLUESSEL_LIZENZ_AKZEPTIERT: False, # Lizenzakzeptanzstatus
     CONFIG_SCHLUESSEL_DATENBANK_PFAD: DATENBANK_DATEINAME_STANDARD, # Standard Datenbankpfad
-    "daten_verzeichnis": DATEN_VERZEICHNIS_STANDARD # Standard Datenverzeichnis
+    "daten_verzeichnis": DATEN_VERZEICHNIS_STANDARD, # Standard Datenverzeichnis
+    CONFIG_SCHLUESSEL_LIZENZSCHLUESSEL: None # Standardmäßig kein Lizenzschlüssel
 }
 
 konfiguration = STANDARD_KONFIGURATION.copy() # Kopie der Standardkonfiguration
@@ -116,6 +127,7 @@ def _validiere_konfiguration(konfiguration_dict: Dict) -> None:
     ausgabe_pfad = konfiguration_dict.get("ausgabe_pfad")
     datenbank_pfad = konfiguration_dict.get(CONFIG_SCHLUESSEL_DATENBANK_PFAD)
     daten_verzeichnis = konfiguration_dict.get("daten_verzeichnis")
+    lizenzschluessel = konfiguration_dict.get(CONFIG_SCHLUESSEL_LIZENZSCHLUESSEL) # Lizenzschlüssel wird auch validiert
 
     if not basis_verzeichnis or not isinstance(basis_verzeichnis, str):
         raise ValueError("Basisverzeichnis in der Konfiguration ungültig.")
@@ -127,6 +139,8 @@ def _validiere_konfiguration(konfiguration_dict: Dict) -> None:
         raise ValueError("Datenbank-Pfad in der Konfiguration ungültig.")
     if daten_verzeichnis and not isinstance(daten_verzeichnis, str):
         raise ValueError("Datenverzeichnis in der Konfiguration ungültig.")
+    if lizenzschluessel and not isinstance(lizenzschluessel, str) and lizenzschluessel is not None: # Lizenzschlüssel kann None sein oder ein String
+        raise ValueError("Lizenzschlüssel in der Konfiguration ungültig.")
 
 
 konfiguration = _lade_konfiguration(CONFIG_DATEI) # Konfiguration beim Start laden
@@ -136,6 +150,8 @@ LOGO_DATEIPFAD = konfiguration["logo_pfad"]
 AUSGABE_DATEIPFAD = konfiguration["ausgabe_pfad"]
 DATENBANK_PFAD = konfiguration[CONFIG_SCHLUESSEL_DATENBANK_PFAD]
 DATEN_VERZEICHNIS = konfiguration["daten_verzeichnis"]
+LIZENZSCHLUESSEL = konfiguration.get(CONFIG_SCHLUESSEL_LIZENZSCHLUESSEL) # Lizenzschlüssel aus Konfiguration laden
+
 
 # --- Lizenzbedingungen (CipherCore Standard: Klar und Rechtlich geprüft) ---
 LIZENZBEDINGUNGEN_TEXT = """
@@ -153,6 +169,102 @@ Sicherheitsverletzungen. Die Nutzung erfolgt auf eigene Gefahr.
 Bitte lesen und akzeptieren Sie die vollständigen Lizenzbedingungen,
 bevor Sie die Software verwenden.
 """
+
+# --- Lizenzschlüssel Validierung Funktionen (RSA basiert) ---
+def lade_oeffentlichen_schluessel(oeffentlicher_schluessel_pfad: str) -> rsa.RSAPublicKey:
+    """
+    Lädt den öffentlichen Schlüssel aus einer PEM-Datei.
+
+    Args:
+        oeffentlicher_schluessel_pfad (str): Pfad zur PEM-Datei des öffentlichen Schlüssels.
+
+    Returns:
+        RSAPublicKey: Der geladene öffentliche Schlüssel.
+
+    Raises:
+        CipherCoreLizenzFehler: Wenn der Schlüssel nicht geladen werden kann.
+    """
+    try:
+        with open(oeffentlicher_schluessel_pfad, "rb") as schluessel_datei:
+            oeffentlicher_schluessel_pem = schluessel_datei.read()
+            oeffentlicher_schluessel = serialization.load_pem_public_key(oeffentlicher_schluessel_pem)
+        return oeffentlicher_schluessel
+    except FileNotFoundError:
+        logger.error(f"Öffentlicher Schlüssel nicht gefunden unter: {oeffentlicher_schluessel_pfad}")
+        raise CipherCoreLizenzFehler(f"Öffentlicher Schlüssel Datei nicht gefunden: {oeffentlicher_schluessel_pfad}")
+    except Exception as e:
+        logger.error(f"Fehler beim Laden des öffentlichen Schlüssels: {e}")
+        raise CipherCoreLizenzFehler(f"Fehler beim Laden des öffentlichen Schlüssels: {e}")
+
+
+def validiere_lizenzschluessel_pro(lizenzschluessel_base64: str, oeffentlicher_schluessel: rsa.RSAPublicKey) -> Tuple[bool, Optional[Dict]]:
+    """
+    Validiert einen signierten Pro-Lizenzschlüssel mit RSA.
+
+    Args:
+        lizenzschluessel_base64 (str): Der Base64-kodierte Lizenzschlüssel.
+        oeffentlicher_schluessel (RSAPublicKey): Der öffentliche RSA-Schlüssel zum Validieren.
+
+    Returns:
+        tuple: (bool, dict oder None) - True und Payload-Daten (dict) bei gültiger Lizenz, False und None bei ungültiger Lizenz.
+    """
+    try:
+        lizenz_json_bytes = base64.urlsafe_b64decode(lizenzschluessel_base64)
+        lizenz_daten = json.loads(lizenz_json_bytes.decode('utf-8'))
+
+        payload_base64 = lizenz_daten.get("payload")
+        signatur_base64 = lizenz_daten.get("signatur")
+
+        if not payload_base64 or not signatur_base64:
+            return False, None # Ungültiges Lizenzformat
+
+        payload_bytes = base64.urlsafe_b64decode(payload_base64)
+        signatur_bytes = base64.urlsafe_b64decode(signatur_base64)
+
+        oeffentlicher_schluessel.verify(
+            signatur_bytes,
+            payload_bytes,
+            padding.PKCS1v15(),
+            hashes.SHA256()
+        ) # Verify wirft InvalidSignature Exception wenn Signatur ungültig
+
+        payload_daten = json.loads(payload_bytes.decode('utf-8'))
+
+        if payload_daten.get("version") != "Pro":
+            return False, None # Falsche Version
+
+        ablaufdatum_str = payload_daten.get("ablaufdatum")
+        if ablaufdatum_str:
+            ablaufdatum = datetime.datetime.strptime(ablaufdatum_str, "%Y-%m-%d").date()
+            if datetime.date.today() > ablaufdatum:
+                return False, payload_daten # Lizenz abgelaufen
+
+        return True, payload_daten # Lizenz gültig
+
+    except (json.JSONDecodeError, InvalidSignature, ValueError, TypeError, base64.binascii.Error) as e: #  Mehr Exceptions abfangen
+        logger.error(f"Fehler bei der Lizenzvalidierung: {e}") #  Für Debugging-Zwecke
+        return False, None # Validierung fehlgeschlagen
+
+
+def ist_pro_version(lizenzschluessel):
+    """
+    Prüft, ob ein Lizenzschlüssel eine gültige Pro-Version Lizenz darstellt (signiert und gültig).
+
+    Args:
+        lizenzschluessel (str): Der zu prüfende Lizenzschlüssel.
+
+    Returns:
+        bool: True, wenn Pro-Version Lizenz gültig, False sonst.
+    """
+    if lizenzschluessel:
+        try:
+            oeffentlicher_schluessel = lade_oeffentlichen_schluessel(OEFFENTLICHER_SCHLUESSEL_PFAD)
+            ist_gueltig, _ = validiere_lizenzschluessel_pro(lizenzschluessel, oeffentlicher_schluessel)
+            return ist_gueltig
+        except CipherCoreLizenzFehler:
+            return False # Fehler beim Laden des Schlüssels -> keine Pro Version
+    return False # Kein Lizenzschlüssel -> keine Pro Version
+
 
 # --- Benutzerdefinierte Exceptions (CipherCore Standard: Präzise Fehlerbehandlung) ---
 class CipherCoreDatenFehler(Exception):
@@ -198,6 +310,10 @@ class CipherCoreDatenValidierungsFehler(CipherCoreDatenFehler):
 class CipherCoreUngültigerDiagrammTypFehler(CipherCoreDatenFehler):
     """Fehler aufgrund eines ungültigen Diagrammtyps."""
     pass
+class CipherCoreLizenzFehler(CipherCoreDatenFehler):
+    """Fehler im Zusammenhang mit der Lizenzierung."""
+    pass
+
 
 
 # --- DatenLader Klasse (CipherCore Standard: Sicheres und Robustes Laden) ---
@@ -406,13 +522,14 @@ class DiagrammGenerator:
     Fokus auf klare und verständliche Diagramme.
     """
 
-    def erstelle_diagramm(self, vergleichs_ergebnisse: Dict[str, str], diagramm_typ: str = DIAGRAMM_TYP_BALKEN) -> str:
+    def erstelle_diagramm(self, vergleichs_ergebnisse: Dict[str, str], diagramm_typ: str = DIAGRAMM_TYP_BALKEN, ist_pro_version: bool = False) -> str:
         """
         Erstellt ein Diagramm zur Visualisierung der Vergleichsergebnisse.
 
         Args:
             vergleichs_ergebnisse (Dict[str, str]): Die Vergleichsergebnisse (Metriken und Werte).
             diagramm_typ (str): Der gewünschte Diagrammtyp ('balken' oder 'kreis').
+            ist_pro_version (bool): Gibt an, ob die Pro-Version aktiv ist.
 
         Returns:
             str: Base64-kodierte PNG-Bilddaten des Diagramms.
@@ -442,12 +559,16 @@ class DiagrammGenerator:
             plt.bar(metrik_bezeichnungen, werte,
                     color=['skyblue', 'lightcoral', 'lightgreen', 'lightsalmon', 'lightseagreen', 'lightgoldenrodyellow'])
             plt.ylabel('Anzahl / Prozent / Durchschnitt')
-        elif diagramm_typ == DIAGRAMM_TYP_KREIS:
+        elif diagramm_typ == DIAGRAMM_TYP_KREIS and ist_pro_version: # Kreisdiagramm nur in Pro Version
             plt.pie(werte, labels=metrik_bezeichnungen, autopct='%1.1f%%', startangle=90)
             plt.ylabel('')
+        elif diagramm_typ == DIAGRAMM_TYP_KREIS and not ist_pro_version: # Fallback auf Balken wenn Kreisdiagramm in Testversion gewählt
+            plt.bar(metrik_bezeichnungen, werte,
+                    color=['skyblue', 'lightcoral', 'lightgreen', 'lightsalmon', 'lightseagreen', 'lightgoldenrodyellow'])
+            plt.ylabel('Anzahl / Prozent / Durchschnitt')
             logger.warning(
-                "Kreisdiagramm-Typ ist noch nicht vollständig optimiert. Es wird ein Balkendiagramm erstellt.")
-            diagramm_typ = DIAGRAMM_TYP_BALKEN # Fallback auf Balkendiagramm, falls Kreisdiagramm nicht optimal
+                "Kreisdiagramm-Typ ist in der Testversion nicht verfügbar. Es wird stattdessen ein Balkendiagramm erstellt.")
+            diagramm_typ = DIAGRAMM_TYP_BALKEN # Fallback auf Balkendiagramm für Testversion
 
         plt.title('Vergleich der Dateien')
         plt.xticks(rotation=45, ha='right')
@@ -484,7 +605,7 @@ class AbstractDataManager(ABC):
         pass
 
     @abstractmethod
-    def speichere_ergebnisse(self, vergleichs_ergebnisse: Dict[str, str], dateiname_datei1: str, dateiname_datei2: str) -> None:
+    def speichere_ergebnisse(self, vergleichs_ergebnisse: Dict[str, str], dateiname_datei1: str, dateiname_datei2: str, ist_pro_version: bool = False) -> None:
         """Speichert die Vergleichsergebnisse."""
         pass
 
@@ -545,16 +666,22 @@ class SQLiteDataManager(AbstractDataManager):
                 verbindung.close()
 
 
-    def speichere_ergebnisse(self, vergleichs_ergebnisse: Dict[str, str], dateiname_datei1: str, dateiname_datei2: str) -> None:
+    def speichere_ergebnisse(self, vergleichs_ergebnisse: Dict[str, str], dateiname_datei1: str, dateiname_datei2: str, ist_pro_version: bool = False) -> None:
         """
         Speichert die Vergleichsergebnisse in der SQLite-Datenbank.
         Verwendet Prepared Statements zum Schutz vor SQL-Injection.
+        Speichern erfolgt nur in der Pro Version.
 
         Args:
             vergleichs_ergebnisse (Dict[str, str]): Die Vergleichsergebnisse.
             dateiname_datei1 (str): Der Dateiname der ersten Datei.
             dateiname_datei2 (str): Der Dateiname der zweiten Datei.
+            ist_pro_version (bool): Gibt an, ob die Pro-Version aktiv ist.
         """
+        if not ist_pro_version: # Speichern nur in Pro Version
+            logger.info("Testversion: Vergleichsergebnisse werden nicht in der Datenbank gespeichert.")
+            return
+
         verbindung = None
         try:
             verbindung = sqlite3.connect(self.datenbank_pfad)
@@ -659,16 +786,22 @@ class FileDataManager(AbstractDataManager):
         return os.path.join(self.daten_verzeichnis, dateiname) # Sichere Pfadkonstruktion
 
 
-    def speichere_ergebnisse(self, vergleichs_ergebnisse: Dict[str, str], dateiname_datei1: str, dateiname_datei2: str) -> None:
+    def speichere_ergebnisse(self, vergleichs_ergebnisse: Dict[str, str], dateiname_datei1: str, dateiname_datei2: str, ist_pro_version: bool = False) -> None:
         """
         Speichert die Vergleichsergebnisse in einer JSON-Datei im Datenverzeichnis.
         Verwendet sichere Dateiverarbeitung mit 'with open' Kontextmanager.
+        Speichern erfolgt nur in der Pro Version.
 
         Args:
             vergleichs_ergebnisse (Dict[str, str]): Die Vergleichsergebnisse.
             dateiname_datei1 (str): Der Dateiname der ersten Datei.
             dateiname_datei2 (str): Der Dateiname der zweiten Datei.
+            ist_pro_version (bool): Gibt an, ob die Pro-Version aktiv ist.
         """
+        if not ist_pro_version: # Speichern nur in Pro Version
+            logger.info("Testversion: Vergleichsergebnisse werden nicht in Dateien gespeichert.")
+            return
+
         datei_pfad = self._generiere_dateinamen(dateiname_datei1, dateiname_datei2)
         daten_zum_speichern = {
             "datei1_name": dateiname_datei1,
@@ -724,7 +857,7 @@ class BerichtsGenerator:
     Sichere Einbindung von Ressourcen (Logo) und robuste Dateispeicherung.
     """
 
-    def __init__(self, logo_pfad: str = LOGO_DATEIPFAD_STANDARD, ausgabe_pfad: str = AUSGABE_DATEIPFAD_STANDARD, daten_manager: Optional[AbstractDataManager] = None):
+    def __init__(self, logo_pfad: str = LOGO_DATEIPFAD_STANDARD, ausgabe_pfad: str = AUSGABE_DATEIPFAD, daten_manager: Optional[AbstractDataManager] = None):
         """
         Initialisiert den Berichtsgenerator.
 
@@ -744,7 +877,7 @@ class BerichtsGenerator:
         logger.debug(f"BerichtsGenerator initialisiert. Logo-Pfad: '{self.logo_pfad}', Ausgabe-Pfad: '{self.ausgabe_pfad}', Daten-Manager: {daten_manager.__class__.__name__ if daten_manager else 'Kein'}")
 
 
-    def erstelle_pdf_bericht(self, vergleichs_ergebnisse: Dict[str, str], diagramm_bild_daten: str, dateiname_datei1: str, dateiname_datei2: str) -> str:
+    def erstelle_pdf_bericht(self, vergleichs_ergebnisse: Dict[str, str], diagramm_bild_daten: str, dateiname_datei1: str, dateiname_datei2: str, ist_pro_version: bool = False) -> str:
         """
         Erstellt einen PDF-Bericht mit Statistiken, Diagramm und CipherCore Firmendetails.
 
@@ -753,15 +886,16 @@ class BerichtsGenerator:
             diagramm_bild_daten (str): Base64-kodierte PNG-Bilddaten des Diagramms.
             dateiname_datei1 (str): Der Dateiname der ersten Datei.
             dateiname_datei2 (str): Der Dateiname der zweiten Datei.
+            ist_pro_version (bool): Gibt an, ob die Pro-Version aktiv ist.
 
         Returns:
             str: Der Pfad zum erstellten PDF-Bericht.
         """
         logger.info(f"Starte PDF-Berichterstellung: '{self.ausgabe_pfad}'...")
 
-        if self.daten_manager:
+        if self.daten_manager: # Speichern der Ergebnisse, Datenmanager entscheidet ob Pro Version benötigt wird
             try:
-                self.daten_manager.speichere_ergebnisse(vergleichs_ergebnisse, dateiname_datei1, dateiname_datei2)
+                self.daten_manager.speichere_ergebnisse(vergleichs_ergebnisse, dateiname_datei1, dateiname_datei2, ist_pro_version) # Pro Version Status übergeben
             except CipherCoreDatenbankFehler as e:
                 logger.error(f"Fehler beim Speichern der Ergebnisse über den Daten-Manager: {e}")
                 raise e # Fehler weiterleiten
@@ -771,7 +905,7 @@ class BerichtsGenerator:
             except Exception as e:
                 logger.exception(f"Unerwarteter Fehler beim Speichern der Ergebnisse über den Daten-Manager: {e}")
                 raise CipherCoreDatenFehler(f"Unerwarteter Fehler beim Speichern der Ergebnisse: {e}") from e
-        else:
+        elif not self.daten_manager:
             logger.warning("Kein DatenManager konfiguriert. Vergleichsergebnisse werden nicht persistent gespeichert.")
 
 
@@ -926,11 +1060,15 @@ def _ist_pfad_sicher_static(datei_pfad: str, basis_verzeichnis: str) -> bool:
 def dateien_vergleichen_und_bericht_erstellen(datei_pfad1: str, datei_pfad2: str, logo_pfad: str = LOGO_DATEIPFAD, ausgabe_pfad: str = AUSGABE_DATEIPFAD,
                                               diagramm_typ: str = DIAGRAMM_TYP_BALKEN, daten_manager: Optional[AbstractDataManager] = None,
                                               ui_status_rueckruf: Optional[Callable[[str], None]] = None,
-                                              spalte_datei1: str = 'Name', spalte_datei2: str = 'Name') -> Tuple[str, Optional[Dict[str, str]]]:
+                                              spalte_datei1: str = 'Name', spalte_datei2: str = 'Name', lizenzschluessel: Optional[str] = None) -> Tuple[str, Optional[Dict[str, str]]]:
     """
     Hauptfunktion: Vergleicht zwei Dateien, erstellt Statistiken, Diagramm und PDF-Bericht.
     Implementiert umfassende Fehlerbehandlung und Logging für robuste Ausführung.
     Klare Schnittstelle mit Rückgabewerten und optionalem UI-Status-Rückruf.
+
+    Pro Version Funktionalität:
+        - Kreisdiagramm ist nur in der Pro Version verfügbar.
+        - Speichern der Vergleichsergebnisse im DatenManager ist nur in der Pro Version aktiv.
 
     Args:
         datei_pfad1 (str): Der Pfad zur ersten Datei (Benutzereingabe).
@@ -942,6 +1080,7 @@ def dateien_vergleichen_und_bericht_erstellen(datei_pfad1: str, datei_pfad2: str
         ui_status_rueckruf (Optional[Callable[[str], None]]): Eine Rückruffunktion zur Aktualisierung des UI-Status (optional).
         spalte_datei1 (str, optional): Spalte für Vergleich aus Datei 1. Standard 'Name'.
         spalte_datei2 (str, optional): Spalte für Vergleich aus Datei 2. Standard 'Name'.
+        lizenzschluessel (Optional[str]): Der Lizenzschlüssel zur Validierung (optional).
 
     Returns:
         Tuple[str, Optional[Dict[str, str]]]: Ein Tuple mit dem Pfad zum PDF-Bericht und den Vergleichsergebnissen.
@@ -950,6 +1089,15 @@ def dateien_vergleichen_und_bericht_erstellen(datei_pfad1: str, datei_pfad2: str
     logger.info(f"Starte Dateivergleich: Datei 1='{datei_pfad1}', Datei 2='{datei_pfad2}'")
     if ui_status_rueckruf:
         ui_status_rueckruf("Vergleich gestartet...")
+
+    ist_pro = ist_pro_version(lizenzschluessel) # Prüfen ob Pro Version aktiv ist
+
+    if lizenzschluessel and not ist_pro:
+        fehler_meldung = "Ungültiger Lizenzschlüssel. Bitte überprüfen Sie Ihren Lizenzschlüssel."
+        logger.error(fehler_meldung)
+        if ui_status_rueckruf:
+            ui_status_rueckruf(fehler_meldung)
+        return fehler_meldung, None # Abbruch, da Lizenz ungültig
 
     try:
         daten_lader = DatenLader(BASIS_VERZEICHNIS)
@@ -964,13 +1112,13 @@ def dateien_vergleichen_und_bericht_erstellen(datei_pfad1: str, datei_pfad2: str
             ui_status_rueckruf("Datenvergleich abgeschlossen...")
 
         diagramm_generator = DiagrammGenerator()
-        diagramm_bild_daten = diagramm_generator.erstelle_diagramm(vergleichs_ergebnisse, diagramm_typ)
+        diagramm_bild_daten = diagramm_generator.erstelle_diagramm(vergleichs_ergebnisse, diagramm_typ, ist_pro) # Pro Version Status übergeben
         if ui_status_rueckruf:
             ui_status_rueckruf("Diagramm erstellt...")
 
         berichts_generator = BerichtsGenerator(logo_pfad, ausgabe_pfad, daten_manager)
         pdf_pfad = berichts_generator.erstelle_pdf_bericht(vergleichs_ergebnisse, diagramm_bild_daten,
-                                                            dateiname_datei1, dateiname_datei2)
+                                                            dateiname_datei1, dateiname_datei2, ist_pro) # Pro Version Status übergeben
         if ui_status_rueckruf:
             ui_status_rueckruf(f"PDF-Bericht erfolgreich erstellt: {pdf_pfad}")
 
@@ -1007,6 +1155,12 @@ def dateien_vergleichen_und_bericht_erstellen(datei_pfad1: str, datei_pfad2: str
         if ui_status_rueckruf:
             ui_status_rueckruf(fehler_meldung)
         return fehler_meldung, None
+    except CipherCoreLizenzFehler as e: # Spezifische Fehlerbehandlung für Lizenzfehler
+        fehler_meldung = f"Lizenzfehler: {e}"
+        logger.error(fehler_meldung)
+        if ui_status_rueckruf:
+            ui_status_rueckruf(fehler_meldung)
+        return fehler_meldung, None
     except Exception as e: # Unerwartete Fehlerbehandlung (Generischer Catch-All)
         logger.exception(f"Unerwarteter Fehler: {e}")
         if ui_status_rueckruf:
@@ -1021,6 +1175,10 @@ class DateiVergleichsApp:
     Tkinter-Anwendung für das CipherCore Datei-Vergleichs-Tool.
     Bietet eine benutzerfreundliche Oberfläche mit klarer Statusanzeige und Fehlerbehandlung.
     Thread-sichere UI-Updates für reaktionsschnelle Anwendung.
+
+    Pro Version Funktionalität in der UI:
+        - Kreisdiagramm Option ist nur in der Pro Version aktiv.
+        - Verlauf anzeigen Button ist nur in der Pro Version aktiv.
     """
     def __init__(self, root: tk.Tk, daten_manager: AbstractDataManager):
         """
@@ -1031,7 +1189,7 @@ class DateiVergleichsApp:
             daten_manager (AbstractDataManager): Der Daten-Manager für die Ergebnispersistenz.
         """
         self.root = root
-        root.title("CipherCore Datei Vergleichs Tool") # Firmenname im Fenstertitel
+        root.title("CipherCore Datei Vergleichs Tool Pro") # Firmenname im Fenstertitel - Pro Version
         self.daten_manager = daten_manager
         self.datei_pfad1 = tk.StringVar()
         self.datei_pfad2 = tk.StringVar()
@@ -1042,6 +1200,8 @@ class DateiVergleichsApp:
         self.verlauf_text = None
         self.spalte_datei1 = tk.StringVar(value='Name') # Standardspalte für Datei 1
         self.spalte_datei2 = tk.StringVar(value='Name') # Standardspalte für Datei 2
+        self.lizenzschluessel_var = tk.StringVar(value=LIZENZSCHLUESSEL if LIZENZSCHLUESSEL else "") # Lizenzschlüssel Variable
+        self.pro_version_aktiv = tk.BooleanVar(value=ist_pro_version(self.lizenzschluessel_var.get())) # Pro Version Status Variable
 
         self._check_lizenz_und_testphase() # Lizenzprüfung vor UI-Erstellung
         if not self.lizenz_akzeptiert.get():
@@ -1049,7 +1209,28 @@ class DateiVergleichsApp:
 
         self._create_widgets() # UI-Elemente erstellen
         self._lade_verlauf_beim_start() # Verlauf beim Start laden und anzeigen
+        self._aktualisiere_lizenz_status_anzeige() # Lizenzstatus beim Start anzeigen
+        self._aktualisiere_pro_version_features() # Pro Version Features initialisieren
         logger.info("DateiVergleichsApp UI initialisiert.")
+
+    def _aktualisiere_pro_version_features(self):
+        """Aktualisiert die UI Elemente basierend auf dem Pro Version Status."""
+        is_pro = ist_pro_version(self.lizenzschluessel_var.get())
+        self.pro_version_aktiv.set(is_pro) # Pro Version Status aktualisieren
+        if is_pro:
+            self.diagramm_dropdown['menu'].entryconfig(DIAGRAMM_TYP_KREIS, state=tk.NORMAL) # Kreisdiagramm aktivieren
+            self.verlauf_button.config(state=tk.NORMAL) # Verlauf Button aktivieren
+        else:
+            self.diagramm_dropdown['menu'].entryconfig(DIAGRAMM_TYP_KREIS, state=tk.DISABLED) # Kreisdiagramm deaktivieren
+            self.verlauf_button.config(state=tk.DISABLED) # Verlauf Button deaktivieren
+
+
+    def _aktualisiere_lizenz_status_anzeige(self):
+        """Aktualisiert die Lizenzstatusanzeige in der UI."""
+        if ist_pro_version(self.lizenzschluessel_var.get()):
+            self.lizenz_status_label.config(text="Lizenzstatus: Pro Version", fg="green")
+        else:
+            self.lizenz_status_label.config(text="Lizenzstatus: Test Version", fg="red")
 
 
     def _check_lizenz_und_testphase(self) -> None:
@@ -1073,8 +1254,8 @@ class DateiVergleichsApp:
         else:
             erster_start_datum = datetime.date.fromisoformat(erster_start_datum_str)
             heute = datetime.date.today()
-            testende_datum = erster_start_datum + datetime.timedelta(days=14) # 14-Tage Testphase
-            if heute > testende_datum:
+            testende_datum = erster_start_datum + datetime.timedelta(14) # 14-Tage Testphase
+            if heute > testende_datum and not ist_pro_version(self.lizenzschluessel_var.get()): # Testphase abgelaufen und keine Pro Version
                 logger.warning("Testphase abgelaufen. Anwendung im Testphasen-Ende-Modus.")
                 messagebox.showwarning("Testphase beendet",
                                      "Ihre 14-tägige Testphase ist abgelaufen. Bitte kontaktieren Sie unser Vertriebsteam von CipherCore, um eine Vollversion zu erwerben.") # Hinweis zur Testphasenende
@@ -1125,54 +1306,65 @@ class DateiVergleichsApp:
         Layout mit Grid-Manager für flexible und responsive Oberfläche.
         Klare Beschriftungen und Benutzerführung.
         """
+        # Lizenzschlüssel Eingabe
+        tk.Label(self.root, text="Lizenzschlüssel (Pro Version):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        Entry(self.root, textvariable=self.lizenzschluessel_var, width=50).grid(row=0, column=1, padx=5, pady=5)
+        Button(self.root, text="Schlüssel aktivieren", command=self.aktiviere_lizenzschluessel).grid(row=0, column=2, padx=5, pady=5)
+
+        # Lizenzstatus Anzeige
+        self.lizenz_status_label = Label(self.root, textvariable=self.status_meldung)
+        self.lizenz_status_label.grid(row=1, column=1, pady=2, sticky="w")
+
+
         # Datei 1 Auswahl
-        tk.Label(self.root, text="Datei 1 (Benutzereingaben):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        tk.Entry(self.root, textvariable=self.datei_pfad1, width=50, state='disabled').grid(row=0, column=1, padx=5, pady=5) # Eingabefeld für Datei 1 (deaktiviert)
-        tk.Button(self.root, text="Datei 1 auswählen", command=self.datei_auswaehlen_datei1).grid(row=0, column=2, padx=5, pady=5) # Button zum Auswählen von Datei 1
+        tk.Label(self.root, text="Datei 1 (Benutzereingaben):").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        tk.Entry(self.root, textvariable=self.datei_pfad1, width=50, state='disabled').grid(row=2, column=1, padx=5, pady=5) # Eingabefeld für Datei 1 (deaktiviert)
+        tk.Button(self.root, text="Datei 1 auswählen", command=self.datei_auswaehlen_datei1).grid(row=2, column=2, padx=5, pady=5) # Button zum Auswählen von Datei 1
 
         # Datei 2 Auswahl
-        tk.Label(self.root, text="Datei 2 (Hauptliste):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        tk.Entry(self.root, textvariable=self.datei_pfad2, width=50, state='disabled').grid(row=1, column=1, padx=5, pady=5) # Eingabefeld für Datei 2 (deaktiviert)
-        tk.Button(self.root, text="Datei 2 auswählen", command=self.datei_auswaehlen_datei2).grid(row=1, column=2, padx=5, pady=5) # Button zum Auswählen von Datei 2
+        tk.Label(self.root, text="Datei 2 (Hauptliste):").grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        tk.Entry(self.root, textvariable=self.datei_pfad2, width=50, state='disabled').grid(row=3, column=1, padx=5, pady=5) # Eingabefeld für Datei 2 (deaktiviert)
+        tk.Button(self.root, text="Datei 2 auswählen", command=self.datei_auswaehlen_datei2).grid(row=3, column=2, padx=5, pady=5) # Button zum Auswählen von Datei 2
 
         # Spaltenauswahl für Datei 1
-        tk.Label(self.root, text="Vergleichsspalte Datei 1:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        tk.Entry(self.root, textvariable=self.spalte_datei1, width=20).grid(row=2, column=1, padx=5, pady=5, sticky="w") # Eingabefeld für Spalte Datei 1
+        tk.Label(self.root, text="Vergleichsspalte Datei 1:").grid(row=4, column=0, padx=5, pady=5, sticky="w")
+        tk.Entry(self.root, textvariable=self.spalte_datei1, width=20).grid(row=4, column=1, padx=5, pady=5, sticky="w") # Eingabefeld für Spalte Datei 1
 
         # Spaltenauswahl für Datei 2
-        tk.Label(self.root, text="Vergleichsspalte Datei 2:").grid(row=3, column=0, padx=5, pady=5, sticky="w")
-        tk.Entry(self.root, textvariable=self.spalte_datei2, width=20).grid(row=3, column=1, padx=5, pady=5, sticky="w") # Eingabefeld für Spalte Datei 2
+        tk.Label(self.root, text="Vergleichsspalte Datei 2:").grid(row=5, column=0, padx=5, pady=5, sticky="w")
+        tk.Entry(self.root, textvariable=self.spalte_datei2, width=20).grid(row=5, column=1, padx=5, pady=5, sticky="w") # Eingabefeld für Spalte Datei 2
 
         # Diagrammtyp Auswahl
-        tk.Label(self.root, text="Diagrammtyp:").grid(row=4, column=0, padx=5, pady=5, sticky="w")
+        tk.Label(self.root, text="Diagrammtyp:").grid(row=6, column=0, padx=5, pady=5, sticky="w")
         diagramm_optionen = [DIAGRAMM_TYP_BALKEN, DIAGRAMM_TYP_KREIS] # Verfügbare Diagrammtypen
-        diagramm_dropdown = tk.OptionMenu(self.root, self.diagramm_typ, *diagramm_optionen) # Dropdown-Menü für Diagrammtyp
-        diagramm_dropdown.grid(row=4, column=1, padx=5, pady=5, sticky="w")
+        self.diagramm_dropdown = tk.OptionMenu(self.root, self.diagramm_typ, *diagramm_optionen) # Dropdown-Menü für Diagrammtyp
+        self.diagramm_dropdown.grid(row=6, column=1, padx=5, pady=5, sticky="w")
 
         # Start Button
         tk.Button(self.root, text="Vergleich starten & PDF-Bericht erstellen", command=self.starte_vergleich, width=30).grid(
-            row=5, column=0, columnspan=3, pady=10) # Button zum Starten des Vergleichs
+            row=7, column=0, columnspan=3, pady=10) # Button zum Starten des Vergleichs
 
         # Statusmeldung
-        tk.Label(self.root, textvariable=self.status_meldung).grid(row=6, column=0, columnspan=3, pady=5) # Label für Statusmeldungen
+        tk.Label(self.root, textvariable=self.status_meldung).grid(row=8, column=0, columnspan=3, pady=5) # Label für Statusmeldungen
 
         # Ergebnis-Textfeld
-        tk.Label(self.root, text="Vergleichsergebnisse:").grid(row=7, column=0, padx=5, pady=5, sticky="nw")
+        tk.Label(self.root, text="Vergleichsergebnisse:").grid(row=9, column=0, padx=5, pady=5, sticky="nw")
         self.ergebnis_text = scrolledtext.ScrolledText(self.root, height=10, width=60) # Textfeld für Vergleichsergebnisse
-        self.ergebnis_text.grid(row=7, column=1, columnspan=2, padx=5, pady=5, sticky="nsew")
+        self.ergebnis_text.grid(row=9, column=1, columnspan=2, padx=5, pady=5, sticky="nsew")
         self.ergebnis_text.config(state='disabled') # Textfeld schreibgeschützt
-        self.root.grid_rowconfigure(7, weight=1) # Zeile für Ergebnis-Textfeld soll expandieren
+        self.root.grid_rowconfigure(9, weight=1) # Zeile für Ergebnis-Textfeld soll expandieren
         self.root.grid_columnconfigure(1, weight=1) # Spalte für Ergebnis-Textfeld soll expandieren
 
         # Verlauf anzeigen Button
-        tk.Button(self.root, text="Verlauf anzeigen", command=self.zeige_verlauf, width=20).grid(row=8, column=0, columnspan=3, pady=10) # Button zum Anzeigen des Verlaufs
+        self.verlauf_button = tk.Button(self.root, text="Verlauf anzeigen", command=self.zeige_verlauf, width=20)
+        self.verlauf_button.grid(row=10, column=0, columnspan=3, pady=10) # Button zum Anzeigen des Verlaufs
 
         # Verlauf-Textfeld
-        tk.Label(self.root, text="Vergleichsverlauf:").grid(row=9, column=0, padx=5, pady=5, sticky="nw")
+        tk.Label(self.root, text="Vergleichsverlauf:").grid(row=11, column=0, padx=5, pady=5, sticky="nw")
         self.verlauf_text = scrolledtext.ScrolledText(self.root, height=10, width=60) # Textfeld für Vergleichsverlauf
-        self.verlauf_text.grid(row=9, column=1, columnspan=2, padx=5, pady=5, sticky="nsew")
+        self.verlauf_text.grid(row=11, column=1, columnspan=2, padx=5, pady=5, sticky="nsew")
         self.verlauf_text.config(state='disabled') # Textfeld schreibgeschützt
-        self.root.grid_rowconfigure(9, weight=1) # Zeile für Verlauf-Textfeld soll expandieren
+        self.root.grid_rowconfigure(11, weight=1) # Zeile für Verlauf-Textfeld soll expandieren
 
 
     def datei_auswaehlen_datei1(self) -> None:
@@ -1196,6 +1388,32 @@ class DateiVergleichsApp:
             self.datei_pfad2.set(datei_pfad) # Pfad in UI speichern
             logger.debug(f"Datei 2 ausgewählt: {datei_pfad}")
 
+    def aktiviere_lizenzschluessel(self):
+        """
+        Aktiviert den eingegebenen Lizenzschlüssel und speichert ihn in der Konfiguration.
+        """
+        lizenzschluessel = self.lizenzschluessel_var.get()
+        try:
+            oeffentlicher_schluessel = lade_oeffentlichen_schluessel(OEFFENTLICHER_SCHLUESSEL_PFAD) # Öffentlichen Schlüssel laden
+            ist_pro, _ = validiere_lizenzschluessel_pro(lizenzschluessel, oeffentlicher_schluessel) # Lizenz validieren
+            if ist_pro:
+                konfiguration[CONFIG_SCHLUESSEL_LIZENZSCHLUESSEL] = lizenzschluessel
+                self._speichere_konfiguration()
+                self._aktualisiere_lizenz_status_anzeige()
+                self._aktualisiere_pro_version_features() # Pro Version Features aktivieren
+                messagebox.showinfo("Lizenzschlüssel aktiviert", "Ihr Lizenzschlüssel wurde erfolgreich aktiviert. Sie nutzen nun die Pro Version.")
+                logger.info("Lizenzschlüssel erfolgreich aktiviert.")
+            else:
+                messagebox.showerror("Ungültiger Lizenzschlüssel", "Der eingegebene Lizenzschlüssel ist ungültig. Bitte überprüfen Sie ihn.")
+                logger.warning("Ungültiger Lizenzschlüssel eingegeben.")
+                konfiguration[CONFIG_SCHLUESSEL_LIZENZSCHLUESSEL] = None # Ungültigen Schlüssel entfernen
+                self._speichere_konfiguration()
+                self._aktualisiere_lizenz_status_anzeige()
+                self._aktualisiere_pro_version_features() # Pro Version Features deaktivieren
+        except CipherCoreLizenzFehler as e:
+             messagebox.showerror("Fehler beim Aktivieren des Lizenzschlüssels", f"Fehler bei der Lizenzschlüsselvalidierung: {e}")
+             logger.error(f"Fehler bei der Lizenzschlüsselvalidierung: {e}")
+
 
     def starte_vergleich(self) -> None:
         """
@@ -1208,6 +1426,7 @@ class DateiVergleichsApp:
         diagramm_typ = self.diagramm_typ.get()
         spalte_datei1 = self.spalte_datei1.get() # Spalte für Datei 1 aus UI holen
         spalte_datei2 = self.spalte_datei2.get() # Spalte für Datei 2 aus UI holen
+        lizenzschluessel = self.lizenzschluessel_var.get() # Lizenzschlüssel aus UI holen
 
         if not datei_pfad1 or not datei_pfad2:
             messagebox.showerror("Fehler", "Bitte wählen Sie beide Dateien aus.") # Fehlermeldung, wenn Dateien fehlen
@@ -1219,14 +1438,14 @@ class DateiVergleichsApp:
         self.ergebnis_text.config(state='disabled') # Textfeld wieder schreibgeschützt machen
         self.verlauf_text.config(state='normal') # Verlauf-Textfeld editierbar machen
         self.verlauf_text.delete('1.0', tk.END) # Textfeld leeren
-        self.verlauf_text.config(state='disabled') # Textfeld wieder schreibgeschützt machen
+        self.verlauf_text.config(state='disabled') # Verlauf-Textfeld wieder schreibgeschützt machen
         self.status_meldung.set("Vergleich wird gestartet...") # Statusmeldung setzen
 
-        threading.Thread(target=self._starte_vergleich_hintergrund, args=(datei_pfad1, datei_pfad2, diagramm_typ, spalte_datei1, spalte_datei2)).start() # Vergleich in Thread starten
+        threading.Thread(target=self._starte_vergleich_hintergrund, args=(datei_pfad1, datei_pfad2, diagramm_typ, spalte_datei1, spalte_datei2, lizenzschluessel)).start() # Vergleich in Thread starten
         logger.info("Vergleichs-Thread gestartet.")
 
 
-    def _starte_vergleich_hintergrund(self, datei_pfad1: str, datei_pfad2: str, diagramm_typ: str, spalte_datei1: str, spalte_datei2: str) -> None:
+    def _starte_vergleich_hintergrund(self, datei_pfad1: str, datei_pfad2: str, diagramm_typ: str, spalte_datei1: str, spalte_datei2: str, lizenzschluessel: str) -> None:
         """
         Führt den Dateivergleich und die Berichterstellung im Hintergrund aus.
         Ruft die Hauptfunktion `dateien_vergleichen_und_bericht_erstellen` auf.
@@ -1238,13 +1457,15 @@ class DateiVergleichsApp:
             diagramm_typ (str): Diagrammtyp.
             spalte_datei1 (str): Spalte für Vergleich aus Datei 1.
             spalte_datei2 (str): Spalte für Vergleich aus Datei 2.
+            lizenzschluessel (str): Der zu verwendende Lizenzschlüssel.
         """
         pdf_pfad, vergleichs_ergebnisse = dateien_vergleichen_und_bericht_erstellen(datei_pfad1, datei_pfad2,
                                                                                      diagramm_typ=diagramm_typ,
                                                                                      daten_manager=self.daten_manager,
                                                                                      ui_status_rueckruf=self.update_status_meldung_ui,
                                                                                      spalte_datei1=spalte_datei1, # Spalten für Vergleich übergeben
-                                                                                     spalte_datei2=spalte_datei2) # Spalten für Vergleich übergeben
+                                                                                     spalte_datei2=spalte_datei2, # Spalten für Vergleich übergeben
+                                                                                     lizenzschluessel=lizenzschluessel)
         if isinstance(pdf_pfad, str) and pdf_pfad.endswith('.pdf'):
             self.update_status_meldung_ui(f"PDF-Bericht erfolgreich erstellt: {pdf_pfad}") # Erfolgsmeldung in UI
             logger.info(f"PDF-Bericht erfolgreich erstellt: {pdf_pfad}")
@@ -1455,7 +1676,7 @@ class TestDataManager(unittest.TestCase):
         datei1_name = "datei1.csv" # Beispiel Dateiname 1
         datei2_name = "datei2.xlsx" # Beispiel Dateiname 2
 
-        self.daten_manager_sqlite.speichere_ergebnisse(vergleichs_ergebnisse, datei1_name, datei2_name) # Ergebnisse speichern
+        self.daten_manager_sqlite.speichere_ergebnisse(vergleichs_ergebnisse, datei1_name, datei2_name, ist_pro_version=True) # Ergebnisse speichern - Pro Version aktiviert für Test
         geladene_ergebnisse_liste = self.daten_manager_sqlite.lade_alle_ergebnisse() # Alle Ergebnisse laden
 
         self.assertIsNotNone(geladene_ergebnisse_liste) # Prüfen, ob Ergebnisse geladen wurden
@@ -1482,7 +1703,7 @@ class TestDataManager(unittest.TestCase):
         datei1_name = "testdatei1.csv" # Beispiel Dateiname 1
         datei2_name = "testdatei2.xlsx" # Beispiel Dateiname 2
 
-        self.daten_manager_file.speichere_ergebnisse(vergleichs_ergebnisse, datei1_name, datei2_name) # Ergebnisse speichern
+        self.daten_manager_file.speichere_ergebnisse(vergleichs_ergebnisse, datei1_name, datei2_name, ist_pro_version=True) # Ergebnisse speichern - Pro Version aktiviert für Test
         geladene_ergebnisse_liste = self.daten_manager_file.lade_alle_ergebnisse() # Alle Ergebnisse laden
 
         self.assertIsNotNone(geladene_ergebnisse_liste) # Prüfen, ob Ergebnisse geladen wurden
@@ -1529,7 +1750,7 @@ class TestDataManager(unittest.TestCase):
         datei2_name = "datei2.xlsx" # Beispiel Dateiname 2
 
         with self.assertRaises(CipherCoreDateiSpeicherFehler): # Erwartet CipherCoreDateiSpeicherFehler
-            self.daten_manager_file.speichere_ergebnisse(vergleichs_ergebnisse, datei1_name, datei2_name) # Ergebnisse speichern (sollte fehlschlagen)
+            self.daten_manager_file.speichere_ergebnisse(vergleichs_ergebnisse, datei1_name, datei2_name, ist_pro_version=True) # Ergebnisse speichern (sollte fehlschlagen) - Pro Version aktiviert für Test
 
         os.chmod(self.test_daten_verzeichnis_file, 0o777) # Verzeichnis wieder beschreibbar machen
 
@@ -1594,7 +1815,8 @@ if __name__ == "__main__":
                 argumente.datei_pfad1, argumente.datei_pfad2,
                 logo_pfad=argumente.logo_pfad, ausgabe_pfad=argumente.ausgabe_pfad,
                 diagramm_typ=argumente.diagramm_typ, daten_manager=daten_manager,
-                spalte_datei1=argumente.spalte_datei1, spalte_datei2=argumente.spalte_datei2 # Spalten für Vergleich übergeben
+                spalte_datei1=argumente.spalte_datei1, spalte_datei2=argumente.spalte_datei2, # Spalten für Vergleich übergeben
+                lizenzschluessel=LIZENZSCHLUESSEL # Lizenzschlüssel übergeben
             )
             if isinstance(pdf_pfad, str) and pdf_pfad.endswith('.pdf'): # Erfolgsmeldung im CLI-Modus
                 print(f"PDF-Bericht erfolgreich erstellt: {pdf_pfad}")
@@ -1609,8 +1831,8 @@ if __name__ == "__main__":
 
         if app.lizenz_akzeptiert.get(): # GUI nur starten, wenn Lizenz akzeptiert
             root.grid_columnconfigure(1, weight=1) # Spalte 1 soll expandieren
-            root.grid_rowconfigure(7, weight=1) # Zeile 7 soll expandieren # Zeile angepasst, da mehr UI-Elemente
             root.grid_rowconfigure(9, weight=1) # Zeile 9 soll expandieren # Zeile angepasst, da mehr UI-Elemente
+            root.grid_rowconfigure(11, weight=1) # Zeile 11 soll expandieren # Zeile angepasst, da mehr UI-Elemente
             ausfuehren_unit_tests = False # Unit-Tests standardmässig deaktiviert
             if ausfuehren_unit_tests:
                 suite = unittest.TestSuite()
